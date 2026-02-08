@@ -1,0 +1,17 @@
+[project]
+name = "ecoli"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "cupy>=13.6.0",
+    "matplotlib>=3.10.8",
+    "numba>=0.63.1",
+    "pandas>=3.0.0",
+    "pims>=0.7",
+    "pyarrow>=23.0.0",
+    "tifffile>=2026.1.28",
+    "tqdm>=4.67.1",
+    "trackpy>=0.7",
+]

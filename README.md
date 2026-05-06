@@ -1,4 +1,6 @@
-# Codes To Extract And Analyze Trajectories of _E.coli_
+# 形态学方法提取大肠杆菌二维轨迹
+
+使用形态学方法从相衬显微影像中提取在焦平面附近大肠杆菌的二维轨迹
 
 首先对宽度 200 为帧的窗口内的图像计算平均，以此为背景从每帧中扣除，从
 而消除不均匀光照与静止背景。截取图片中亮度值在平均值以下的部分。随后使
@@ -7,6 +9,10 @@
 内的连通区域，认为这些连通区域代表大肠杆菌。如此可以消除在焦平面之外细
 菌的影响。最后使用 Crocker 等人的方法[2] 将离散的坐标点连接，得到大肠杆
 菌的二维运动轨迹。
+
+# Extract Trajectories of _E.coli_ Using Morphological Methods
+
+Extract two-dimensional trajectories of _E. coli_ near focal plane using morphological methods.
 
 First, the average of the images within a window with a width of 200 frames
 is calculated, and this is used as the background to be subtracted from each frame,

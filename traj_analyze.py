@@ -1,457 +1,413 @@
-import sys
-from typing import Callable, Literal
+# %%
+# Import all libraries and define all functions
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import os
 from scipy.signal import savgol_filter
 
 
-def filtered_speed(
+def load_config(config_path):
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+config = load_config("conf/config_2.2.json")
+
+
+def msd_lagtime(
     traj: pd.DataFrame,
-    window: int = 51,
-    polyorder: int = 3,
-    delta: float = 1.0,
-) -> pd.Series:
-    dx = traj.groupby("particle")["x"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=1, delta=delta)
-    )
-    dy = traj.groupby("particle")["y"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=1, delta=delta)
-    )
+    on_coord: str,
+) -> np.ndarray:
+    def _msd_lagtime(traj, on_coord):
+        disp = traj[on_coord]
+        N = len(disp)
 
-    return (dx.pow(2) + dy.pow(2)).pow(0.5) * 0.66 / 20
+        D = np.append(np.square(disp), 0)
+        Q = 2 * np.sum(D)
+        S1 = np.zeros(N)
+        for m in range(N):
+            Q = Q - D[m - 1] - D[N - m]
+            S1[m] = Q / (N - m)
+
+        F = np.fft.fft(disp, n=(2 * N))
+        PSD = F * F.conjugate()
+        S2 = np.fft.ifft(PSD)[:N].real / np.arange(1, N + 1)[::-1]
+
+        msd = (S1 - 2 * S2)[1:-1]
+        return msd
+
+    if on_coord == "xy":
+        return _msd_lagtime(traj, "x") + _msd_lagtime(traj, "y")
+    elif on_coord == "yz":
+        return _msd_lagtime(traj, "y") + _msd_lagtime(traj, "z")
+    elif on_coord == "zx":
+        return _msd_lagtime(traj, "x") + _msd_lagtime(traj, "z")
+    elif on_coord == "xyz":
+        return (
+            _msd_lagtime(traj, "x") + _msd_lagtime(traj, "y") + _msd_lagtime(traj, "z")
+        )
+    else:
+        return _msd_lagtime(traj, on_coord)
 
 
-def filtered_curv(
+def powerlaw_msd(
     traj: pd.DataFrame,
-    window: int = 51,
-    polyorder: int = 3,
-    delta: float = 1.0,
-    cutoff: tuple[float, float] = (1 / 2044, 1 / 10),
-) -> pd.Series:
-    dx = traj.groupby("particle")["x"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=1, delta=delta)
-    )
-    dy = traj.groupby("particle")["y"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=1, delta=delta)
-    )
-    ddx = traj.groupby("particle")["x"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=2, delta=delta)
-    )
-    ddy = traj.groupby("particle")["y"].transform(
-        lambda x: savgol_filter(x, window, polyorder, deriv=2, delta=delta)
-    )
-
-    numerator = np.abs((dx * ddy - ddx * dy).to_numpy())
-    denominator = ((dx.pow(2) + dy.pow(2)).pow(1.5)).to_numpy()
-    curv = np.divide(
-        numerator,
-        denominator,
-        out=np.zeros_like(denominator),
-        where=(denominator != 0),
-    )
-    curv[curv > cutoff[1]] = np.nan
-    curv[curv < cutoff[0]] = np.nan
-
-    return curv
-
-
-def locate_tumbles(
-    traj: pd.DataFrame,
-    filter_window: int = 7,
-    detect_window: int = 1,
-    min_distance: int = 40,
-    thresh: int = 1,
-    full: bool = False,
+    on_coord: str,
 ):
-    traj["filtered_v"] = filtered_speed(traj, window=filter_window)
-    traj["filtered_curv"] = filtered_curv(traj, window=filter_window)
+    if len(traj) < 20:
+        return np.nan
 
-    traj["norm_v"] = (
-        traj["filtered_v"] - traj.groupby("particle")["filtered_v"].mean()
-    ) / traj.groupby("particle")["filtered_v"].std()
-    traj["norm_curv"] = (
-        traj["filtered_curv"] - traj.groupby("particle")["filtered_curv"].mean()
-    ) / traj.groupby("particle")["filtered_curv"].std()
+    msd = msd_lagtime(traj, on_coord)[: len(traj // 5)]
 
-    tumbles = np.logical_and(
-        traj.groupby("particle")["norm_v"].transform(
-            lambda nv: (nv.lt(-thresh))
-            .rolling(detect_window)
-            .aggregate(np.logical_or.reduce)
-        ),
-        traj.groupby("particle")["norm_curv"].transform(
-            lambda nc: (nc.abs().gt(thresh))
-            .rolling(detect_window)
-            .aggregate(np.logical_or.reduce)
-        ),
+    log_lagtime = np.log(np.arange(1, len(msd) + 1))
+    log_msd = np.log(msd, out=np.zeros_like(msd), where=msd > 0)
+
+    alpha = np.polyfit(log_lagtime, log_msd, 1)[0]
+    return alpha
+
+
+def locate_tumble(
+    ptraj,
+    omega_thresh=35,
+    subsampling=2,
+    return_subsampling=False,
+    do_smooth=False,
+):
+    n_origin = len(ptraj)
+    ptraj = ptraj[::subsampling]
+
+    if do_smooth:
+        if len(ptraj) > 4:
+            ptraj["x"] = savgol_filter(ptraj.x, 3, 2)
+            ptraj["y"] = savgol_filter(ptraj.y, 3, 2)
+
+    # Locate tumble
+    vx = np.diff(ptraj.x, append=np.nan)
+    vy = np.diff(ptraj.y, append=np.nan)
+    v = np.sqrt(vx**2 + vy**2)
+
+    omega = (
+        np.arccos((vx[1:-1] * vx[:-2] + vy[1:-1] * vy[:-2]) / v[1:-1] / v[:-2])
+        / np.pi
+        * 180
     )
 
-    # Clean up tumbles within min_distance
-    # idx = 0
-    # while idx < len(tumbles):
-    #     if tumbles.iloc[idx]:
-    #         tumbles.iloc[idx + 1 : idx + min_distance + 1] = False
-    #         idx += min_distance + 1
-    #     else:
-    #         idx += 1
+    n = len(ptraj)
+    is_tumble = np.zeros(n, dtype=bool)
 
-    return tumbles
+    current_state = "tumbling"
+    for i in range(n - 2):
+        if i <= n - 3:
+            if all(omega[i : i + 3] < omega_thresh):
+                current_state = "running"
+
+        if current_state == "running":
+            if i <= n - 2:
+                if all(omega[i : i + 2] > omega_thresh):
+                    current_state = "tumbling"
+
+            if omega[i] > omega_thresh:
+                if i >= 2 and i <= n - 3:
+                    vx_after = ptraj.x.iloc[i + 2] - ptraj.x.iloc[i]
+                    vy_after = ptraj.y.iloc[i + 2] - ptraj.y.iloc[i]
+                    vx_before = ptraj.x.iloc[i] - ptraj.x.iloc[i - 2]
+                    vy_before = ptraj.y.iloc[i] - ptraj.y.iloc[i - 2]
+                    v_after = np.sqrt(vx_after**2 + vy_after**2)
+                    v_before = np.sqrt(vx_before**2 + vy_before**2)
+                    delta_dir = (
+                        np.arccos(
+                            (vx_after * vx_before + vy_after * vy_before)
+                            / v_after
+                            / v_before
+                        )
+                        / np.pi
+                        * 180
+                    )
+                    if delta_dir > omega_thresh:
+                        current_state = "tumbling"
+
+        is_tumble[i + 1] = current_state == "tumbling"
+
+    if return_subsampling:
+        return is_tumble
+    else:
+        return np.repeat(is_tumble, subsampling)[:n_origin]
 
 
-class DataVisualizationCanvas:
-    def __init__(
-        self,
-        traj_file: str,
-        scaling: int = 1,
-        filter_func: Callable[[pd.Series], bool] = (lambda x: True),
-    ) -> None:
-        font_size = 8.0 * scaling
-        large_font_size = 9.0 * scaling
-        small_font_size = 7.0 * scaling
-        # medium_font_size = font_size
+def get_tumble_data(bulk_trajs, subsampling, omega_thresh, do_smooth):
+    plot_data = []
+    for pid, ptraj in bulk_trajs.groupby("particle"):
+        if len(ptraj) < 10:
+            continue
+        is_tumble = locate_tumble(
+            ptraj,
+            subsampling=subsampling,
+            omega_thresh=omega_thresh,
+            do_smooth=do_smooth,
+        )
+        tumble_start = np.nonzero(np.diff(is_tumble.astype(int), prepend=1) > 0)[0]
+        tumble_end = np.nonzero(np.diff(is_tumble.astype(int), append=1) < 0)[0]
 
-        plt.rcParams.update(
+        if np.sum(tumble_start) < 2:
+            continue
+
+        tumble_start = np.append(tumble_start, len(ptraj) - 1)
+        tumble_end = np.insert(tumble_end, 0, 0)
+
+        running_delta_x = (
+            ptraj["x"].to_numpy()[tumble_start] - ptraj["x"].to_numpy()[tumble_end]
+        )
+        running_delta_y = (
+            ptraj["y"].to_numpy()[tumble_start] - ptraj["y"].to_numpy()[tumble_end]
+        )
+
+        out_delta_x = running_delta_x[1:] * config["um_per_pixel"]
+        out_delta_y = running_delta_y[1:] * config["um_per_pixel"]
+        in_delta_x = running_delta_x[:-1] * config["um_per_pixel"]
+        in_delta_y = running_delta_y[:-1] * config["um_per_pixel"]
+
+        out_angle = np.atan2(out_delta_x, -out_delta_y) / np.pi * 180
+        in_angle = np.atan2(in_delta_x, -in_delta_y) / np.pi * 180
+        theta = np.abs(out_angle - in_angle)
+        theta[theta > 180] = 360 - theta[theta > 180]
+
+        runnning_time = (
+            ptraj["frame"].to_numpy()[tumble_start[1:]]
+            - ptraj["frame"].to_numpy()[tumble_end[1:]]
+        ) / config["frame_per_second"]
+        runnning_time[-1] = np.nan
+
+        plot_data.append(
+            pd.DataFrame(
+                {
+                    "running_time": runnning_time,
+                    "tumble_start_frame": ptraj["frame"].to_numpy()[tumble_start[:-1]],
+                    "tumble_start_y": ptraj["y"].to_numpy()[tumble_start[:-1]]
+                    * config["um_per_pixel"],
+                    "out_angle": out_angle,
+                    "in_angle": in_angle,
+                    "theta": theta,
+                }
+            )
+        )
+    plot_data = pd.concat(plot_data)
+    return plot_data
+
+
+def bin_index(x, bins):
+    deltax = (x.max() - x.min()) / bins
+    return ((x - x.min()) / deltax).astype(int)
+
+
+def bin_edges(x, bins):
+    return np.linspace(x.min(), x.max(), bins + 1)
+
+
+# %%
+# Load trajectories
+trajs = pd.read_parquet(
+    os.path.join(
+        config["frame_dir"],
+        f"../trajs_morph/{os.path.basename(config['frame_dir'])}.parquet.gzip",
+    )
+)
+print(trajs.frame.nunique())
+
+# %%
+# Filtering
+# filtered_trajs = trajs.groupby("particle").filter(lambda p: len(p) > 20)
+filtered_trajs = trajs.groupby("particle").filter(lambda p: powerlaw_msd(p, "y") > 1.8)
+filtered_trajs = filtered_trajs[filtered_trajs.y.between(200, 800)]
+# fig, ax = plt.subplots()
+# ax.hist(
+#     (
+#         trajs
+#         .groupby("particle")
+#         .apply(lambda p: powerlaw_msd(p, "y"))
+#         .dropna()
+#     ),
+#     bins=100
+# )
+# ax.set_xlim(0, 2)
+# plt.show()
+
+# %%
+# Test filtering
+fig, ax = plt.subplots(2, 2)
+ax[0, 0].hist(trajs.x, bins=20)
+ax[0, 1].hist(trajs.y, bins=20)
+ax[0, 0].set_xlabel("X")
+ax[0, 1].set_xlabel("Y")
+ax[1, 0].hist(filtered_trajs.x, bins=20)
+ax[1, 1].hist(filtered_trajs.y, bins=20)
+ax[1, 0].set_xlabel("X")
+ax[1, 1].set_xlabel("Y")
+plt.show()
+
+# %%
+# Generate velocity data
+subsampling = 2
+window = 4
+polyorder = 2
+velocity_data = []
+for pid, ptraj in filtered_trajs.groupby("particle"):
+    if len(ptraj) < subsampling:
+        continue
+    sub_ptraj = ptraj[::subsampling]
+    if len(sub_ptraj) > window:
+        vx = (
+            np.diff(savgol_filter(sub_ptraj.x, window, polyorder), append=np.nan)
+            / subsampling
+            * config["frame_per_second"]
+            * config["um_per_pixel"]
+            / subsampling
+        )
+        vy = (
+            np.diff(savgol_filter(sub_ptraj.y, window, polyorder), append=np.nan)
+            / subsampling
+            * config["frame_per_second"]
+            * config["um_per_pixel"]
+            / subsampling
+        )
+    else:
+        vx = (
+            np.diff(sub_ptraj.x, append=np.nan)
+            / config["frame_per_second"]
+            / subsampling
+            * config["um_per_pixel"]
+        )
+        vy = (
+            np.diff(sub_ptraj.y, append=np.nan)
+            / config["frame_per_second"]
+            / subsampling
+            * config["um_per_pixel"]
+        )
+    v = np.sqrt(vx**2 + vy**2)
+    velocity_data.append(
+        pd.DataFrame(
             {
-                "lines.linewidth": 0.7 * scaling,
-                "font.family": "sans-serif",
-                "font.sans-serif": "Noto Sans SC",
-                "font.size": font_size,
-                "axes.linewidth": 0.5 * scaling,
-                "axes.titlesize": large_font_size,
-                "axes.labelsize": small_font_size,
-                "xtick.labelsize": small_font_size,
-                "ytick.labelsize": small_font_size,
-                "xtick.major.size": 2 * scaling,
-                "xtick.minor.size": 1 * scaling,
-                "xtick.direction": "in",
-                "xtick.major.width": 0.5 * scaling,
-                "xtick.minor.width": 0.5 * scaling,
-                "ytick.major.size": 2 * scaling,
-                "ytick.minor.size": 1 * scaling,
-                "ytick.direction": "in",
-                "ytick.major.width": 0.5 * scaling,
-                "ytick.minor.width": 0.5 * scaling,
-                "legend.fontsize": small_font_size,
-                "figure.figsize": (2.76 * scaling, 2.76 * 0.6 * scaling),
-                "figure.titlesize": large_font_size,
-                "figure.labelsize": large_font_size,
-                "savefig.dpi": "figure",
+                "frame": ptraj.frame,
+                "y_um": ptraj.y * config["um_per_pixel"],
+                "x_um": ptraj.x * config["um_per_pixel"],
+                "vx": np.repeat(vx, subsampling)[: len(ptraj)],
+                "vy": np.repeat(vy, subsampling)[: len(ptraj)],
+                "v": np.repeat(v, subsampling)[: len(ptraj)],
             }
         )
-
-        self.fig, self.ax = plt.subplots()
-        self.fig.set_layout_engine("constrained")
-
-        self.traj = pd.read_parquet(traj_file)
-        self.traj = self.traj.groupby("particle").filter(filter_func)
-        self.traj.dropna(inplace=True)
-        if len(self.traj) == 0:
-            raise RuntimeError("No traj survived after filtering")
-
-    def test_plot(self) -> None:
-        x = np.linspace(0, 2 * np.pi, 100)
-        y = np.sin(x)
-        self.ax.plot(x, y)
-        self.ax.set_xlabel("x")
-        self.ax.set_ylabel("y")
-
-    def plot_all_traj(self, alpha: float = 0.8) -> None:
-        # for pid, ptraj in self.traj.groupby("particle"):
-        #     self.ax.plot(
-        #         ptraj.x * 0.66, ptraj.y * 0.66, "b-", alpha=alpha, linewidth=0.5
-        #     )
-
-        self.ax.plot(self.traj.x, self.traj.y, "bo", alpha=alpha, markersize=0.1)
-
-        self.ax.set_xlim(0, 1024 * 0.66)
-        self.ax.set_ylim(0, 1022 * 0.66)
-        self.ax.set_xlabel("x [\u03bcm]")
-        self.ax.set_ylabel("y [\u03bcm]")
-        self.ax.set_aspect("equal")
-
-    def plot_t_y_pdf(
-        self, frame_span: tuple[int | None, int | None] | None = None
-    ) -> None:
-        if frame_span is None:
-            fspan = np.linspace(self.traj.frame.min(), self.traj.frame.max(), 100)
-        else:
-            fmin = 0 if frame_span[0] is None else frame_span[0]
-            fmax = self.traj.frame.max() if frame_span[1] is None else frame_span[1]
-            fspan = np.linspace(fmin, fmax, 100)
-        yedges = np.linspace(0, 1022 * 0.66, 100)
-        ydist_all = []
-        for fstart, fend in zip(fspan[:-1], fspan[1:]):
-            part_traj = self.traj[self.traj.frame.between(fstart, fend)]
-            hist, _ = np.histogram(part_traj.y * 0.66, bins=yedges)
-            ydist_all.append(hist / hist.sum() / 0.66)
-        ydist_all_np = np.array(ydist_all)
-
-        aximg = self.ax.imshow(
-            ydist_all_np.T,
-            origin="lower",
-            extent=(fspan[0] / 20, fspan[-1] / 20, yedges[0], yedges[-1]),
-            aspect="auto",
-            cmap="viridis",
-            interpolation="bilinear",
-        )
-        self.ax.set_xlabel("Time [s]")
-        self.ax.set_ylabel("y [\u03bcm]")
-        plt.colorbar(
-            aximg, ax=self.ax, pad=0.02, label="1D PDF along $y$ [\u03bcm$^{-1}$]"
-        )
-
-    def plot_y_pdf(self, frame: int | None = None, frame_len: int = 100) -> None:
-        f = self.traj.frame.max() if frame is None else frame
-        traj = self.traj[self.traj.frame.between(f - frame_len, f)]
-        yedges = np.linspace(0, 1022 * 0.66, 100)
-        hist, _ = np.histogram(traj.y * 0.66, bins=yedges)
-
-        self.ax.step(yedges[1:], hist / hist.sum() / 0.66)
-        self.ax.set_xlabel("y [\u03bcm]")
-        self.ax.set_ylabel("PDF [\u03bcm$^{-1}$]")
-
-    def plot_lagtime_msd_counts(self, coord: Literal["x", "y", "both"] = "y") -> None:
-        def msd_lagtime(
-            _traj: pd.DataFrame, _coord: Literal["x", "y", "both"] = "y"
-        ) -> pd.DataFrame:
-            def _msd_lagtime(__traj, __coord):
-                disp = __traj[__coord]
-                N = len(disp)
-                D = np.append(np.square(disp), 0)
-                F = np.fft.fft(disp, n=2 * N)
-                S2 = np.fft.ifft(F * F.conjugate())[:N].real / np.arange(1, N + 1)[::-1]
-                Q = 2 * D.sum()
-                S1 = np.zeros(N)
-                for m in range(N):
-                    Q = Q - D[m - 1] - D[N - m]
-                    S1[m] = Q / (N - m)
-                return S1 - 2 * S2
-
-            if _coord == "both":
-                return _msd_lagtime(_traj, "x") + _msd_lagtime(_traj, "y")
-            else:
-                return _msd_lagtime(_traj, _coord)
-
-        grouped = self.traj.groupby("particle")
-        all_msd = []
-        for _, ptraj in grouped:
-            all_msd.append(msd_lagtime(ptraj, "y"))
-
-        times = np.concatenate([np.arange(len(msd)) for msd in all_msd]) / 20
-        msds = np.concatenate(all_msd) * 0.66**2
-
-        tedges = np.geomspace(times[times > 0].min(), times.max(), 100)
-        msdedges = np.geomspace(1e-3, msds.max(), 100)
-
-        cmap = plt.colormaps["viridis"]
-        cmap = cmap.with_extremes(bad=cmap(0))
-        hist, _, _ = np.histogram2d(times, msds, bins=(tedges, msdedges))
-        pcm = self.ax.pcolormesh(tedges, msdedges, hist.T, cmap=cmap)
-        self.ax.axline(
-            (tedges.min(), 1e-2),
-            slope=1,
-            linestyle="dashed",
-            color="white",
-            label="slope = 1",
-        )
-        self.ax.axline(
-            (tedges.min(), 1e-2),
-            slope=2,
-            linestyle="dashed",
-            color="white",
-            label="slope = 2",
-        )
-        self.ax.set_xscale("log")
-        self.ax.set_yscale("log")
-        self.ax.set_xlabel("Lag time [s]")
-        self.ax.set_ylabel("$MSD$ [\u03bcm$^2$]")
-        self.ax.legend(loc="upper left")
-        plt.colorbar(pcm, ax=self.ax, label="# points")
-
-    def plot_time_y_speed(self, tstep: int = 100, ystep: int = 10) -> None:
-        tspan = np.arange(0, self.traj.frame.max(), tstep)
-        yspan = np.arange(0, self.traj.y.max(), ystep)
-
-        speed_mesh = np.zeros(shape=(tspan.size, yspan.size))
-        count_mesh = np.zeros(shape=(tspan.size, yspan.size))
-
-        for row in range(len(self.traj)):
-            i = int(self.traj.frame.iloc[row] / tstep)
-            j = int(self.traj.y.iloc[row] / ystep)
-            count_mesh[i, j] += 1
-            speed_mesh[i, j] += self.traj.v.iloc[row]
-
-        speed_mesh /= count_mesh
-
-        cmap = plt.colormaps["viridis"]
-        cmap = cmap.with_extremes(bad=cmap(0))
-
-        pcm = self.ax.pcolormesh(
-            tspan / 20, yspan * 0.66, speed_mesh.T, shading="nearest", cmap=cmap
-        )
-        self.ax.set_xlabel("Time [s]")
-        self.ax.set_ylabel("y [\u03bcm]")
-
-        plt.colorbar(pcm, ax=self.ax, label="Speed [\u03bcm/s]")
-
-    def plot_vmean_y_pdf(self, vbins: int = 100, ybins: int = 100) -> None:
-        vmean = self.traj.groupby("particle")["v"].transform(lambda x: x.mean())
-
-        vspan = np.linspace(vmean.min(), vmean.max(), vbins)
-        yspan = np.linspace(0, self.traj.y.max(), ybins)
-
-        hist, xedges, yedges = np.histogram2d(vmean, self.traj.y, bins=(vspan, yspan))
-        hist_sum = hist.sum(axis=1, keepdims=True)
-        hist = np.divide(hist, hist_sum, out=np.zeros_like(hist), where=(hist_sum > 0))
-        # hist = hist[: len(vspan[vspan < 30]) - 1, :]
-        # vspan = vspan[vspan < 30]
-
-        pcm = self.ax.pcolormesh(vspan, yspan * 0.66, hist.T, cmap="viridis")
-        self.ax.set_xlabel("Mean speed [\u03bcm/s]")
-        self.ax.set_ylabel("y [\u03bcm]")
-        plt.colorbar(pcm, ax=self.ax, label="PDF [\u03bcm$^{-1}$]")
-
-    def plot_y_vmean_pdf(self, vbins: int = 100, ybins: int = 100) -> None:
-        vmean = self.traj.groupby("particle")["v"].transform(lambda x: x.mean())
-
-        vspan = np.linspace(vmean.min(), vmean.max(), vbins)
-        yspan = np.linspace(0, self.traj.y.max(), ybins)
-
-        hist, xedges, yedges = np.histogram2d(self.traj.y, vmean, bins=(yspan, vspan))
-        hist_sum = hist.sum(axis=1, keepdims=True)
-        hist = np.divide(hist, hist_sum, out=np.zeros_like(hist), where=(hist_sum > 0))
-
-        pcm = self.ax.pcolormesh(yspan * 0.66, vspan, hist.T)
-        self.ax.set_xlabel("y [\u03bcm]")
-        self.ax.set_ylabel("Mean speed [\u03bcm/s]")
-        plt.colorbar(pcm, ax=self.ax, label="PDF [\u03bcm$^{-1}$ s]")
-
-    def plot_radius_y_pdf(self, rstep: int = 10, ystep: int = 10) -> None:
-        radius = 1 / filtered_curv(self.traj)
-
-        self.traj["radius"] = radius
-        self.traj.dropna(inplace=True)
-
-        rspan = np.linspace(
-            self.traj.radius.min(),
-            self.traj.radius.max(),
-            int((self.traj.radius.max() - self.traj.radius.min()) / rstep),
-        )
-        yspan = np.arange(0, self.traj.y.max(), ystep)
-
-        hist, xedges, yedges = np.histogram2d(
-            self.traj.radius, self.traj.y, bins=(rspan, yspan)
-        )
-        hist_sum = hist.sum(axis=1, keepdims=True)
-        hist_sum[hist_sum == 0] = 1
-        hist /= hist_sum
-
-        pcm = self.ax.pcolormesh(rspan * 0.66, yspan * 0.66, hist.T)
-        self.ax.set_xlabel("$R=1/\\kappa$ [\u03bcm]")
-        self.ax.set_ylabel("y [\u03bcm]")
-        plt.colorbar(pcm, ax=self.ax, label="PDF [\u03bcm$^{-1}$]")
-
-    def plot_curv_y_pdf(
-        self, window: int = 51, cbins: int = 100, ystep: int = 10
-    ) -> None:
-        curv = filtered_curv(self.traj, window=window)
-
-        self.traj["radius"] = curv
-        self.traj.dropna(inplace=True)
-
-        cspan = np.linspace(self.traj.radius.min(), self.traj.radius.max(), cbins)
-        yspan = np.arange(0, self.traj.y.max(), ystep)
-
-        hist, xedges, yedges = np.histogram2d(
-            self.traj.radius, self.traj.y, bins=(cspan, yspan)
-        )
-        hist_sum = hist.sum(axis=1, keepdims=True)
-        hist = np.divide(hist, hist_sum, out=np.zeros_like(hist), where=(hist_sum > 0))
-
-        pcm = self.ax.pcolormesh(cspan / 0.66, yspan * 0.66, hist.T)
-        self.ax.set_xlabel("$\\kappa$ [\u03bcm$^{-1}$]")
-        self.ax.set_ylabel("y [\u03bcm]")
-        plt.colorbar(pcm, ax=self.ax, label="PDF [\u03bcm$^{-1}$]")
-
-    def test_savitzky_golay_filer(self) -> None:
-        pid = np.random.choice(self.traj.particle.unique())
-
-        traj = self.traj[self.traj.particle == pid]
-
-        curv = filtered_curv(traj, window=11)
-
-        self.ax.scatter(traj.x, traj.y, c=curv)
-        self.ax.set_xlabel("x [pixel]")
-        self.ax.set_xlabel("y [pixel]")
-        self.ax.set_aspect("equal")
-
-    def test_tumbles(self) -> None:
-        pid = np.random.choice(self.traj.particle.unique())
-
-        traj = self.traj[self.traj.particle == pid].copy()
-
-        tumbles = locate_tumbles(
-            traj, filter_window=9, detect_window=3, min_distance=3, thresh=1
-        )
-
-        self.ax.plot(traj.x, traj.y, "-", label="traj")
-        self.ax.scatter(
-            traj.loc[tumbles, "x"],
-            traj.loc[tumbles, "y"],
-            marker="^",
-            color="r",
-            label="tumbles",
-        )
-        self.ax.set_xlabel("x [pixel]")
-        self.ax.set_xlabel("y [pixel]")
-        self.ax.set_aspect("equal")
-        self.ax.legend()
-
-    def test_length_stat(self) -> None:
-        length = (
-            self.traj.groupby("particle").size()
-            * self.traj.groupby("particle")["v"].mean()
-            / 20
-        )
-
-        hist, xedges = np.histogram(length.to_numpy(), bins=100, density=True)
-        hist = hist / np.sum(hist)
-
-        self.ax.step(xedges[:-1], hist)
-        self.ax.set_xlabel("traj.length [\u03bcm]")
-        self.ax.set_ylabel("Count")
-
-
-if __name__ == "__main__":
-    basename = sys.argv[1]
-
-    suffix = ".filtered.parquet.gzip"
-    suffix_figure = ".vmsd_filtered.after300s"
-
-    canvas = DataVisualizationCanvas(
-        "trajs/" + basename + suffix,
-        scaling=3,
-        filter_func=(lambda x: x.frame.min() > 300 * 20),
     )
-    canvas.plot_t_y_pdf()
-    plt.savefig("figures/pdf/" + basename + suffix_figure + ".ydist_time.pdf")
+velocity_data = pd.concat(velocity_data)
 
-    canvas = DataVisualizationCanvas(
-        "trajs/" + basename + suffix,
-        scaling=3,
-        filter_func=(lambda x: x.frame.min() > 300 * 20),
+# Drift analyze
+# drift = velocity_data.vx.mean()
+# velocity_data["vx"] = velocity_data.vx - drift
+# velocity_data["v"] = np.sqrt(velocity_data.vx**2 + velocity_data.vy**2)
+
+# Save velocity data
+velocity_data.to_parquet(
+    os.path.join(
+        config["frame_dir"],
+        "../trajs_morph/",
+        f"{os.path.basename(config['frame_dir'])}_velocity.parquet.gzip",
+    ),
+    compression="gzip",
+)
+
+# %%
+# Plot \rho v - v curve
+velocity_data = pd.read_parquet(
+    os.path.join(
+        config["frame_dir"],
+        "../trajs_morph/",
+        f"{os.path.basename(config['frame_dir'])}_velocity.parquet.gzip",
+    ),
+)
+
+grouped_velocity_data = velocity_data.groupby(bin_index(velocity_data.y_um, 20))
+
+density = grouped_velocity_data.size()[:-1]
+mean_v = grouped_velocity_data["v"].mean()[:-1]
+yedges = bin_edges(velocity_data.y_um, 20)
+
+density = density / np.sum(density) / (yedges[1] - yedges[0])
+mean_v = mean_v / mean_v.max()
+
+coeff = np.polyfit(np.log(mean_v), np.log(density), 1)
+
+fig, ax = plt.subplots()
+ax.plot(mean_v, density, "o", color="black", markerfacecolor="none", label="Data")
+ax.plot(
+    [mean_v.min(), mean_v.max()],
+    np.exp(np.polyval(coeff, np.log([mean_v.min(), mean_v.max()]))),
+    "--",
+    color="black",
+    label=f"$\\alpha$ = {coeff[0]:.2f}",
+)
+ax.set_xscale("log")
+ax.set_yscale("log")
+ax.xaxis.set_major_locator(plt.MultipleLocator(0.1))
+ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
+ax.xaxis.set_minor_locator(plt.MultipleLocator(0.02))
+ax.yaxis.set_minor_locator(plt.MultipleLocator(0.02))
+ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
+ax.set_xticklabels([], minor=True)
+ax.set_yticklabels([], minor=True)
+ax.tick_params(axis="both", which="both", direction="in")
+ax.legend()
+plt.show()
+
+# %%
+# Test tumble recognizer
+fig, ax = plt.subplots()
+for thresh in [35, 40, 45, 50]:
+    plot_data = get_tumble_data(
+        filtered_trajs, subsampling=1, omega_thresh=thresh, do_smooth=True
     )
-    canvas.plot_vmean_y_pdf()
-    plt.savefig("figures/pdf/" + basename + suffix_figure + ".vmean_y_pdf.pdf")
 
-    canvas = DataVisualizationCanvas(
-        "trajs/" + basename + suffix,
-        scaling=3,
-        filter_func=(lambda x: x.frame.min() > 300 * 20 and len(x) > 100),
-    )
-    canvas.plot_curv_y_pdf()
-    plt.savefig("figures/pdf/" + basename + suffix_figure + ".curvature_y_pdf.pdf")
+    # ax.hist(plot_data["deltavy"], bins=400)
+    # ax.set_xlim(-10, 10)
+    ax.hist(plot_data["theta"], bins=40, label=f"{thresh}", alpha=0.5)
+    # hist, xedges, yedges = np.histogram2d(plot_data["out"], theta, bins=(20, 20))
+    # hist, xedges, yedges = np.histogram2d(plot_data["out"], plot_data["running_time"], bins=(20, 20))
+    # hist, xedges, yedges = np.histogram2d(plot_data["in"], plot_data["out"], bins=(20, 20))
+    # hist = hist / np.sum(hist, axis=1, keepdims=True)
+    # pcm = ax.pcolormesh(xedges, yedges, hist.T)
+    # fig.colorbar(pcm, ax=ax)
+    # ax.scatter(plot_data["out"], theta, s=1, marker=".", alpha=0.3, color="black")
+plt.show()
 
-    # canvas.plot_all_traj(alpha=0.2)
-    # plt.show()
+# %%
+# Tumble statistics
+plot_data = get_tumble_data(filtered_trajs, 2, 35, True).dropna()
+fig, ax = plt.subplots()
+
+# count = 0
+# all_theta_mean = []
+# for _, data in plot_data.groupby(bin_index(plot_data["tumble_start_frame"], 5)):
+#     hist, xedges, yedges = np.histogram2d(data["out_angle"], data["theta"], bins=(5, 20))
+#     hist = hist / np.sum(hist, axis=1, keepdims=True)
+#     xcenter = (xedges[1:] + xedges[:-1])/2
+#     ycenter = (yedges[1:] + yedges[:-1])/2
+#     all_theta_mean.append(np.average(np.tile(ycenter, (5, 1)), axis=1, weights=hist))
+#     count += 1
+#     if count == 5:
+#         break
+# all_theta_mean = np.asarray(all_theta_mean)
+# theta_mean = np.mean(all_theta_mean, axis=0)
+# theta_mean_std = np.std(all_theta_mean, axis=0)
+# ax.errorbar(xcenter, theta_mean, yerr=theta_mean_std)
+
+hist, xedges, yedges = np.histogram2d(
+    plot_data["in_angle"], plot_data["theta"], bins=(10, 20)
+)
+hist = hist / np.sum(hist, axis=1, keepdims=True)
+pcm = ax.pcolormesh(xedges, yedges, hist.T)
+fig.colorbar(pcm, ax=ax)
+
+# print(np.mean(np.cos(plot_data["out_angle"])))
+# ax.hist(plot_data["out_angle"], bins=20)
+# ax.hist(theta, bins=40)
+
+plt.show()

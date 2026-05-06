@@ -1,0 +1,18 @@
+{
+  "um_per_pixel": 0.66,
+  "frame_dir": "/media/labpc/ExpDataGYH/Ecoli/mw4e5_peo2.2_mb20_260130_sample0_bulk",
+  "frame_per_second": 20,
+  "frame_width": 1024,
+  "frame_height": 1022,
+  "frame_cropping": false,
+  "frame_subsampling": false,
+  "frame_height_range": [50, -50],
+  "frame_start": 6000,
+  "frame_end": 17991,
+  "average_frame_length": 201,
+  "denoise_erosion_radius": 1.5,
+  "denoise_openclose_radius": 1.5,
+  "label_thresh": [10, 50],
+  "link_search_range": 5,
+  "link_memory": 0
+}

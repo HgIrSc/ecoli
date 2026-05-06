@@ -3,15 +3,16 @@ name = "ecoli"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 dependencies = [
-    "cupy>=13.6.0",
     "matplotlib>=3.10.8",
-    "numba>=0.63.1",
-    "pandas>=3.0.0",
-    "pims>=0.7",
-    "pyarrow>=23.0.0",
-    "tifffile>=2026.1.28",
-    "tqdm>=4.67.1",
+    "notebook>=7.5.5",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "pyarrow>=23.0.1",
+    "pyqt6>=6.10.2",
+    "scikit-image>=0.26.0",
+    "scipy>=1.17.1",
+    "tqdm>=4.67.3",
     "trackpy>=0.7",
 ]

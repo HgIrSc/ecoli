@@ -10,6 +10,8 @@
 菌的影响。最后使用 Crocker 等人的方法[2] 将离散的坐标点连接，得到大肠杆
 菌的二维运动轨迹。
 
+本算法参考并修改自[3]。
+
 # Extract Trajectories of _E.coli_ Using Morphological Methods
 
 Extract two-dimensional trajectories of _E. coli_ near focal plane using morphological methods.
@@ -27,6 +29,8 @@ influence of bacteria outside the focal plane. Finally, the discrete coordinate
 points are connected using the method of Crocker et al. [2] to obtain the
 two-dimensional motion trajectory of E. coli.
 
+This algorithm is based on and modified from [3].
+
 [1] Kapur J, Sahoo P, Wong A. A new method for gray-level picture thresholding
 using the entropy of the histogram[J/OL]. Computer Vision, Graphics, and Image
 Processing, 1985, 29(3): 273-285 [2026-04-09]. https://linkinghub.elsevier.com
@@ -36,3 +40,8 @@ Processing, 1985, 29(3): 273-285 [2026-04-09]. https://linkinghub.elsevier.com
 Studies[J/OL]. Journal of Colloid and Interface Science, 1996, 179(1): 298-310
 [2025-05-16]. https://linkinghub.elsevier.com/retrieve/pii/S0021979796902179.
 DOI: 10.1006/jcis.1996.0217
+
+[3] Seyrich M, Alirezaeizanjani Z, Beta C, et al. Statistical parameter inference of
+bacterial swimming strategies[J/OL]. New Journal of Physics, 2018, 20(10):
+103033(2018-10-25) [2025-07-02]. https://iopscience.iop.org/article/10.1088
+/1367-2630/aae72c. DOI: 10.1088/1367-2630/aae72c

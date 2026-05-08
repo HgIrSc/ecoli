@@ -20,8 +20,8 @@ def load_config(config_path) -> Dict:
 
 class Preprocessor:
     def __init__(self, frame_seq: List[str], config: Dict):
-        frame0 = self.crop(self.read_frame(frame_seq[0]))
         self.config = config
+        frame0 = self.crop(self.read_frame(frame_seq[0]))
         self.frame_sum = np.zeros_like(frame0, dtype=np.float32)
         self.frame_deque = deque()
         for frame_path in frame_seq[: self.config["average_frame_length"] + 1]:

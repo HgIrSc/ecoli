@@ -13,7 +13,7 @@ def load_config(config_path):
         return json.load(f)
 
 
-config = load_config("conf/config_2.2.json")
+config = load_config("conf/config_1.25.json")
 
 
 def msd_lagtime(
@@ -219,7 +219,7 @@ print(trajs.frame.nunique())
 # Filtering
 # filtered_trajs = trajs.groupby("particle").filter(lambda p: len(p) > 20)
 filtered_trajs = trajs.groupby("particle").filter(lambda p: powerlaw_msd(p, "y") > 1.8)
-filtered_trajs = filtered_trajs[filtered_trajs.y.between(200, 800)]
+filtered_trajs = filtered_trajs[filtered_trajs.y.between(200, 600)]
 # fig, ax = plt.subplots()
 # ax.hist(
 #     (
@@ -331,12 +331,14 @@ mean_v = grouped_velocity_data["v"].mean()[:-1]
 yedges = bin_edges(velocity_data.y_um, 20)
 
 density = density / np.sum(density) / (yedges[1] - yedges[0])
-mean_v = mean_v / mean_v.max()
+mean_v = mean_v
 
-coeff = np.polyfit(np.log(mean_v), np.log(density), 1)
+coeff = np.polyfit(np.log(mean_v), np.log(density * mean_v), 1)
 
 fig, ax = plt.subplots()
-ax.plot(mean_v, density, "o", color="black", markerfacecolor="none", label="Data")
+ax.plot(
+    mean_v, density * mean_v, "o", color="black", markerfacecolor="none", label="Data"
+)
 ax.plot(
     [mean_v.min(), mean_v.max()],
     np.exp(np.polyval(coeff, np.log([mean_v.min(), mean_v.max()]))),
@@ -346,14 +348,6 @@ ax.plot(
 )
 ax.set_xscale("log")
 ax.set_yscale("log")
-ax.xaxis.set_major_locator(plt.MultipleLocator(0.1))
-ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
-ax.xaxis.set_minor_locator(plt.MultipleLocator(0.02))
-ax.yaxis.set_minor_locator(plt.MultipleLocator(0.02))
-ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
-ax.set_xticklabels([], minor=True)
-ax.set_yticklabels([], minor=True)
 ax.tick_params(axis="both", which="both", direction="in")
 ax.legend()
 plt.show()
